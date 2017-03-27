@@ -1,0 +1,6 @@
+PKG hardcaml
+PKG ppx_deriving_hardcaml
+PKG incremental
+SRC src
+B _build/src
+B _build/test
