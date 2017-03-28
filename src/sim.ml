@@ -5,7 +5,7 @@
   registers and turning then into input/output pairs.
 
   (note; the API doesn't enforce combinatorial logic to be a DAG, but it doesn't
-         make sense if its not.  With registers, the graph can be acyclic which is
+         make sense if its not.  With registers, the graph can be cyclic which is
          why they must be extracted)
 
   Register state is updated externally.
@@ -53,7 +53,12 @@ end = struct
   module Inc = Incremental_lib.Incremental.Make ()
   module Var = Inc.Var
 
-  type simulator = B.t list
+  module MemMap = Map.Make(struct
+    type t = int
+    let compare = compare
+  end)
+
+  type simulator = B.t list * B.t MemMap.t list
   type reset = unit -> simulator
   type cycle = simulator -> B.t I.t -> simulator * B.t O.t
 
@@ -64,20 +69,20 @@ end = struct
 
   let find_elements outputs =
     search
-      (fun (regs, mems, consts, inputs, remaining) signal ->
+      (fun (regs, mems, consts, inputs) signal ->
          if signal = Signal.Comb.empty then
-           (regs, mems, consts, inputs, remaining)
+           (regs, mems, consts, inputs)
          else if is_reg signal then
-           (signal::regs, mems, consts, inputs ,remaining)
+           (signal::regs, mems, consts, inputs)
          else if is_const signal then
-           (regs, mems, signal::consts, inputs ,remaining)
+           (regs, mems, signal::consts, inputs)
          else if is_input signal then
-           (regs, mems, consts, signal::inputs ,remaining)
+           (regs, mems, consts, signal::inputs)
          else if is_mem signal then
-           (regs, signal::mems, consts, inputs, remaining)
+           (regs, signal::mems, consts, inputs)
          else
-           (regs, mems, consts, inputs, signal::remaining)
-      ) id ([],[],[],[],[]) outputs 
+           (regs, mems, consts, inputs)
+      ) id ([],[],[],[]) outputs 
 
   let register_clr_ena map r = 
     let clr = 
@@ -99,7 +104,7 @@ end = struct
   let build_sim inputs outputs = 
 
     (* set up initial incremental nodes for inputs, constants and registers *)
-    let regs, mems, consts, inputs_l, remaining = find_elements (O.to_list outputs) in
+    let regs, mems, consts, inputs_l = find_elements (O.to_list outputs) in
 
     (* create inputs vars
        
@@ -132,12 +137,23 @@ end = struct
         imap inputs_l inputs_lvw 
     in
 
+    (* memory maps *)
+    let mems_v = List.map 
+        (fun s -> Var.create @@ (B.zero (width s), (MemMap.empty : B.t MemMap.t))) mems 
+    in
+    let mems_w = List.map Var.watch mems_v in
+    let mmap = List.fold_left2 (fun m r w -> UidMap.add (uid r) w m) UidMap.empty mems mems_w in
+
     (* construct incremental graph *)
     let rec create map signal = 
       (*let () = Printf.printf "%s\n" (to_string signal) in*)
       match UidMap.find (uid signal) map with
       | s -> map, s
       | exception Not_found -> begin
+        let deps = function
+          | Signal_mem(_,_,_,m) -> [m.mem_read_address]
+          | s -> deps s 
+        in
         let map, deps = 
           List.fold_left 
             (fun (map,l) s -> 
@@ -154,8 +170,12 @@ end = struct
         | Signal_const(_) 
         | Signal_reg(_) ->
           failwith "signal expected to be in map"
-        | Signal_mem(_) -> 
-          failwith "not sure how to deal with memories..."
+        | Signal_mem(_,_,_,m) -> 
+          let ra = List.hd deps in (* custom set up above *)
+          let mem = UidMap.find (uid signal) mmap in
+          add @@ Inc.map2 
+            ~f:(fun addr (const,mem) -> 
+                  try MemMap.find (B.to_int addr) mem with Not_found -> const) ra mem
         | Signal_op(_,op) ->
           begin
             let op2 op = 
@@ -222,14 +242,14 @@ end = struct
         end
         | _ -> failwith "unexpected"
       in
-      List.map reset_val regs 
+      List.map reset_val regs, []
     in
 
     (* observed outputs and registers *)
     let outputs_o = O.(map (fun s -> Inc.observe @@ UidMap.find (uid s) imap) outputs) in
     let regs_o = List.map Inc.observe regs_nxt in
 
-    let cycle state inps = 
+    let cycle (state,_) inps = 
       (* apply inputs *)
       ignore @@ I.(map2 Var.set inputs_v inps);
       (* apply current register values *)
@@ -240,7 +260,7 @@ end = struct
       List.iter2 Var.set regs_v nxt_state;
       Inc.stabilize ();
       let nxt_outputs = O.map Inc.Observer.value_exn outputs_o in
-      nxt_state, nxt_outputs
+      (nxt_state,[]), nxt_outputs
     in
 
     reset, cycle
