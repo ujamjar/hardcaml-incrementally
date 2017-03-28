@@ -194,9 +194,14 @@ end = struct
             | Signal_eq -> op2 B.(==:)
             | Signal_not -> add @@ Inc.map ~f:B.(~:) (List.hd deps)
             | Signal_lt -> op2 B.(<:)
-            (* XXX TODO *)
-            | Signal_cat -> failwith "concat not implemented"
-            | Signal_mux -> failwith "mux not implemented"
+            | Signal_cat -> add @@ Inc.map ~f:B.concat Inc.(all deps)
+            | Signal_mux -> 
+              let sel = List.hd deps in
+              let data = List.tl deps in
+              let last = List.length data - 1 in
+              add @@ Inc.map2 
+                ~f:(fun sel data -> List.nth data (min last (B.to_int sel))) 
+                sel Inc.(all data)
           end
         | Signal_wire(_,d) -> 
           add @@ Inc.map ~f:(fun x -> x) (List.hd deps) 
