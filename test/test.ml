@@ -2,6 +2,7 @@
 
 module I = struct
   type 'a t = {
+    ena : 'a;
     a : 'a;
     b : 'a;
   }[@@deriving hardcaml]
@@ -19,7 +20,7 @@ open HardCaml.Signal.Comb
 let f i = 
   let open I in
   let open HardCaml.Signal.Seq in
-  let reg = reg r_full vdd in
+  let reg = reg r_full i.ena in
   let c = i.a &: i.b in
   let d = i.a |: i.b in
   let c = reg c in
@@ -34,15 +35,17 @@ let test () =
   let open I in
   let open O in
   let sim = reset () in
-  let show o = Printf.printf "%i %i\n" (B.to_int o.c) (B.to_int o.d); in
-  let sim,o = cycle sim { a = B.vdd; b = B.gnd } in
-  show o;
-  let sim,o = cycle sim { a = B.vdd; b = B.vdd } in
-  show o;
-  let sim,o = cycle sim { a = B.vdd; b = B.vdd } in
-  show o;
-  let sim,o = cycle sim { a = B.vdd; b = B.vdd } in
-  show o;
+  let show o = Printf.printf "%i %i " (B.to_int o.c) (B.to_int o.d); in
+  let show o n = show o; show n; Printf.printf "\n" in
+  let def = { ena = B.vdd; a = B.gnd; b = B.gnd } in
+  let sim,o,n = cycle sim { def with a = B.vdd; b = B.gnd } in
+  show o n;
+  let sim,o,n = cycle sim { def with a = B.vdd; b = B.vdd } in
+  show o n;
+  let sim,o,n = cycle sim { def with a = B.vdd; b = B.vdd } in
+  show o n;
+  let sim,o,n = cycle sim { def with a = B.vdd; b = B.vdd } in
+  show o n;
 
   ()
 

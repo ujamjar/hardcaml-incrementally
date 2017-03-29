@@ -8,7 +8,7 @@
          make sense if its not.  With registers, the graph can be cyclic which is
          why they must be extracted)
 
-  Register state is updated externally.
+  Register and memory state is updated externally.
 
   An update step consists of the following parts
 
@@ -27,21 +27,23 @@
    6. Stabalize the graph
 
   (note; step 3 can be moved into the reset function)
-
-  TODO;
-
-   * Implement the mux and concat nodes (how to go from ['a Inc.t list] to ['a list Inc.t])
-   * Implement the clear/enable logic around registers (done)
-   * How do we deal with memories, in particular the read_address?
-
 *)
+
 open HardCaml
 
 module Make(B : Comb.S)(I : Interface.S)(O : Interface.S)() : sig
 
-  type simulator
+  module MemMap : Map.S with type key = int
+
+  type register = B.t
+  type memory = B.t * B.t MemMap.t
+  type simulator = register list * memory list
   type reset = unit -> simulator
-  type cycle = simulator -> B.t I.t -> simulator * B.t O.t
+  type cycle = simulator -> B.t I.t -> simulator * B.t O.t * B.t O.t
+
+  exception Unexpected_signal of string
+  exception Unsupported_signal of string
+  exception Input_has_multiple_names of string
 
   val make : (Signal.Comb.t I.t -> Signal.Comb.t O.t) -> reset * cycle
 
@@ -58,31 +60,15 @@ end = struct
     let compare = compare
   end)
 
-  type simulator = B.t list * B.t MemMap.t list
+  type register = B.t
+  type memory = B.t * B.t MemMap.t
+  type simulator = register list * memory list
   type reset = unit -> simulator
-  type cycle = simulator -> B.t I.t -> simulator * B.t O.t
+  type cycle = simulator -> B.t I.t -> simulator * B.t O.t * B.t O.t
 
-  let is_input signal = 
-    match signal with
-    | Signal_wire(_,d) when !d = Signal_empty && List.length (names signal) = 1 -> true
-    | _ -> false
-
-  let find_elements outputs =
-    search
-      (fun (regs, mems, consts, inputs) signal ->
-         if signal = Signal.Comb.empty then
-           (regs, mems, consts, inputs)
-         else if is_reg signal then
-           (signal::regs, mems, consts, inputs)
-         else if is_const signal then
-           (regs, mems, signal::consts, inputs)
-         else if is_input signal then
-           (regs, mems, consts, signal::inputs)
-         else if is_mem signal then
-           (regs, signal::mems, consts, inputs)
-         else
-           (regs, mems, consts, inputs)
-      ) id ([],[],[],[]) outputs 
+  exception Unexpected_signal of string
+  exception Unsupported_signal of string
+  exception Input_has_multiple_names of string
 
   let register_clr_ena map r = 
     let clr = 
@@ -101,175 +87,249 @@ end = struct
 
   let bool_of_bit = Inc.map ~f:(fun d -> if B.to_int d = 0 then false else true) 
 
+  type maps = 
+    {
+      (* interface hardware nodes *)
+      comb : B.t Inc.t UidMap.t;
+      (* input values *)
+      inps : B.t Var.t UidMap.t;
+      (* registers - signal, input Var.t and next Inc.t *)
+      regs : (Signal.Comb.t * B.t Var.t * B.t Inc.t) UidMap.t;
+      (* memories - signal, input Var.t and next Inc.t *)
+      mems : (Signal.Comb.t * memory Var.t * memory Inc.t) UidMap.t;
+    }
+
+  let add_comb x y m = { m with comb = UidMap.add x y m.comb } 
+  let add_inps x y m = { m with inps = UidMap.add x y m.inps } 
+  let add_regs x y m = { m with regs = UidMap.add x y m.regs } 
+  let add_mems x y m = { m with mems = UidMap.add x y m.mems } 
+
   let build_sim inputs outputs = 
 
-    (* set up initial incremental nodes for inputs, constants and registers *)
-    let regs, mems, consts, inputs_l = find_elements (O.to_list outputs) in
+    let unexpected signal = raise (Unexpected_signal (to_string signal)) in
+    let unsupported signal = raise (Unsupported_signal (to_string signal)) in
 
-    (* create inputs vars
-       
-       We *should* have the same inputs defined in the interface, as found in the
-       circuit.  The following deals with problems if they dont exactly match. *)
-    let inputs_v, inputs_w, inputs_lvw = 
-      let mk b = 
-        let v = Var.create @@ B.zero b in
-        let w = Var.watch v in
-        v, w
-      in
-      let l = List.map (fun s -> List.hd (names s), mk (width s)) inputs_l in
-      let i = I.map (fun (n,b) -> try List.assoc n l with Not_found -> mk b) I.t in
-      I.map fst i, I.map snd i, l
-    in
-
-    (* create vars for the current value of each register *)
-    let regs_v = List.map (fun s -> Var.create @@ B.zero (width s)) regs in
-    let regs_w = List.map Var.watch regs_v in
-
-    (* add inputs, constants and registers to the initial map *)
-    let imap = UidMap.empty in
-    let imap = List.fold_left2 (fun m r i -> UidMap.add (uid r) i m) imap regs regs_w in
-    let imap = List.fold_left 
-        (fun m c -> UidMap.add (uid c) (Inc.const @@ B.constb @@ const_value c) m) 
-        imap consts 
-    in
-    let imap = 
-      List.fold_left2 (fun m s (_,(_,v)) -> UidMap.add (uid s) v m)
-        imap inputs_l inputs_lvw 
-    in
-
-    (* memory maps *)
-    let mems_v = List.map 
-        (fun s -> Var.create @@ (B.zero (width s), (MemMap.empty : B.t MemMap.t))) mems 
-    in
-    let mems_w = List.map Var.watch mems_v in
-    let mmap = List.fold_left2 (fun m r w -> UidMap.add (uid r) w m) UidMap.empty mems mems_w in
-
-    (* construct incremental graph *)
+    (* Construct incremental graph.
+       Traverses the hardware graph recursively from outputs. *)
     let rec create map signal = 
       (*let () = Printf.printf "%s\n" (to_string signal) in*)
-      match UidMap.find (uid signal) map with
+      match UidMap.find (uid signal) map.comb with
       | s -> map, s
       | exception Not_found -> begin
-        let deps = function
-          | Signal_mem(_,_,_,m) -> [m.mem_read_address]
-          | s -> deps s 
-        in
-        let map, deps = 
-          List.fold_left 
-            (fun (map,l) s -> 
-              let map,s = create map s in
-              map, s::l) (map,[]) (deps signal)
-        in
-        let deps = List.rev deps in
-        let add i = UidMap.add (uid signal) i map, i in
         match signal with
-        | Signal_empty -> 
-          failwith "cant compile empty signal"
-        | Signal_inst(_,_,i) -> 
-          failwith ("Instantiation " ^ i.inst_name ^ " not supported in simulation")
-        | Signal_const(_) 
-        | Signal_reg(_) ->
-          failwith "signal expected to be in map"
-        | Signal_mem(_,_,_,m) -> 
-          let ra = List.hd deps in (* custom set up above *)
-          let mem = UidMap.find (uid signal) mmap in
-          add @@ Inc.map2 
-            ~f:(fun addr (const,mem) -> 
-                  try MemMap.find (B.to_int addr) mem with Not_found -> const) ra mem
-        | Signal_op(_,op) ->
-          begin
-            let op2 op = 
-              let a = List.nth deps 0 in
-              let b = List.nth deps 1 in
-              add @@ Inc.map2 ~f:op a b
-            in 
-            match op with
-            | Signal_add -> op2 B.(+:) 
-            | Signal_sub -> op2 B.(-:) 
-            | Signal_mulu -> op2 B.( *: ) 
-            | Signal_muls -> op2 B.( *+ )
-            | Signal_and -> op2 B.(&:)
-            | Signal_or -> op2 B.(|:)
-            | Signal_xor -> op2 B.(^:)
-            | Signal_eq -> op2 B.(==:)
-            | Signal_not -> add @@ Inc.map ~f:B.(~:) (List.hd deps)
-            | Signal_lt -> op2 B.(<:)
-            | Signal_cat -> add @@ Inc.map ~f:B.concat Inc.(all deps)
-            | Signal_mux -> 
-              let sel = List.hd deps in
-              let data = List.tl deps in
-              let last = List.length data - 1 in
-              add @@ Inc.map2 
-                ~f:(fun sel data -> List.nth data (min last (B.to_int sel))) 
-                sel Inc.(all data)
-          end
+
+        | Signal_empty 
+        | Signal_inst(_) -> unsupported signal
+
+        (* constants *)
+        | Signal_const(_) -> 
+          let c = Inc.const (B.constb (const_value signal)) in
+          add_comb (uid signal) c map, c
+
+        (* operators ie (+:) etc *)
+        | Signal_op(_,op) -> begin
+          let map, deps = create_list map (deps signal) in
+          let add i = add_comb (uid signal) i map, i in
+          let op2 op = 
+            let a = List.nth deps 0 in
+            let b = List.nth deps 1 in
+            add @@ Inc.map2 ~f:op a b
+          in 
+          match op with
+          | Signal_add -> op2 B.(+:) 
+          | Signal_sub -> op2 B.(-:) 
+          | Signal_mulu -> op2 B.( *: ) 
+          | Signal_muls -> op2 B.( *+ )
+          | Signal_and -> op2 B.(&:)
+          | Signal_or -> op2 B.(|:)
+          | Signal_xor -> op2 B.(^:)
+          | Signal_eq -> op2 B.(==:)
+          | Signal_not -> add @@ Inc.map ~f:B.(~:) (List.hd deps)
+          | Signal_lt -> op2 B.(<:)
+          | Signal_cat -> add @@ Inc.map ~f:B.concat Inc.(all deps)
+          | Signal_mux -> 
+            let sel = List.hd deps in
+            let data = List.tl deps in
+            let last = List.length data - 1 in
+            add @@ Inc.map2 
+              ~f:(fun sel data -> List.nth data (min last (B.to_int sel))) 
+              sel Inc.(all data)
+        end
+
+        (* input wire *)
+        | Signal_wire(_,d) when !d = Signal_empty -> 
+          if List.length (names signal) <> 1 then 
+            raise (Input_has_multiple_names (to_string signal))
+          else
+            let v = Var.create @@ B.zero (width signal) in (* XXX need this value *)
+            let map = add_inps (uid signal) v map in
+            let w = Var.watch v in
+            add_comb (uid signal) w map, w
+
+        (* internal wires *)
         | Signal_wire(_,d) -> 
-          add @@ Inc.map ~f:(fun x -> x) (List.hd deps) 
-        | Signal_select(_,h,l) -> add @@ Inc.map ~f:(fun s -> B.select s h l) (List.hd deps)
+          let map, d = create map !d in
+          let d = Inc.map ~f:(fun x -> x) d in
+          add_comb (uid signal) d map, d
+
+        (* part selection *)
+        | Signal_select(_,h,l) -> 
+          let map, s = create map (List.hd (deps signal)) in
+          let s = Inc.map ~f:(fun s -> B.select s h l) s in
+          add_comb (uid signal) s map, s
+
+        (* registers *)
+        | Signal_reg(_,r) ->
+          (* create input for register, add to map *)
+          let v = Var.create @@ B.zero (width signal) in
+          let q = Var.watch v in
+          let map = add_comb (uid signal) q map in
+          (* recurse to inputs (data, clock, reset, clear etc) *)
+          let map, d = create_list map (deps signal) in
+          let d = List.hd d in (* input data *)
+          (* implement next value register logic *)
+          let clr, ena = register_clr_ena map.comb r in
+          let lev l b = if l then b else Inc.map ~f:(not) b in
+          let d = 
+            match ena with 
+            | Some(e) -> Inc.if_ (bool_of_bit e) ~then_:d ~else_:q 
+            | None -> d 
+          in
+          let d = 
+            match clr with 
+            | Some(c,v,l) -> Inc.if_ (lev l (bool_of_bit c)) ~then_:v ~else_:d
+            | None -> d
+          in
+          (* add input and next reg value *)
+          let map = add_regs (uid signal) (signal,v,d) map in
+          map, q
+
+        (* memories *)
+        | Signal_mem(_,_,r,ms) -> 
+          let map, ra = create map ms.mem_read_address in (* XXX mustnt be a comb loop from q->ra *)
+          let v = Var.create @@ (B.zero (width signal), (MemMap.empty : B.t MemMap.t)) in
+          let m = Var.watch v in
+          let q = 
+            Inc.map2 
+              ~f:(fun addr (const,mem) -> 
+                    try MemMap.find (B.to_int addr) mem with Not_found -> const) ra m
+          in
+          let map = add_comb (uid signal) q map in
+          let map, _ = create_list map (deps signal) in
+          (* memory write logic (clear, enable etc) *)
+          let clr, ena = register_clr_ena map.comb r in
+          let lev l b = if l then b else Inc.map ~f:(not) b in
+          let m = 
+            match ena with 
+            | Some(e) -> 
+              let d = UidMap.find (uid (List.hd (deps signal))) map.comb in
+              let wa = UidMap.find (uid ms.mem_write_address) map.comb in
+              Inc.if_ (bool_of_bit e) 
+                ~then_:Inc.(map3 ~f:(fun wa d (c,m) -> c, MemMap.add (B.to_int wa) d m) wa d m)
+                ~else_:m 
+            | None -> m 
+          in
+          let m = 
+            match clr with 
+            | Some(c,v,l) -> 
+              Inc.if_ (lev l (bool_of_bit c)) 
+                ~then_:Inc.(map2 ~f:(fun (_,m) c -> c, MemMap.empty) m v) 
+                ~else_:m
+            | None -> m
+          in
+          (* add input and next mem value *)
+          let map = add_mems (uid signal) (signal,v,m) map in
+          map, q
+
       end 
+
+    and create_list map signals = 
+      let map, l = 
+        List.fold_left 
+          (fun (map,l) s -> 
+            let map,s = create map s in
+            map, s::l) (map,[]) signals
+      in
+      map, List.rev l
     in
 
     (* traverse the design from all outputs *)
-    let create_list map lst = List.fold_left (fun map s -> fst @@ create map s) map lst in
-    let imap = create_list imap (O.to_list outputs) in
-    (* and from the dependants of registers *)
-    let imap = List.fold_left (fun map s -> create_list map (deps s)) imap regs in
-
-    (* next value of each register also implementing clear and enable logic *)
-    let create_reg (map : B.t Inc.t UidMap.t) signal = 
-      match signal with
-      | Signal_reg(_,r) -> begin
-        let d = UidMap.find (uid (List.hd (deps signal))) map in
-        let q = UidMap.find (uid signal) map in
-        let clr, ena = register_clr_ena map r in
-        let lev l b = if l then b else Inc.map ~f:(not) b in
-        let d = 
-          match ena with 
-          | Some(e) -> Inc.if_ (bool_of_bit e) ~then_:d ~else_:q 
-          | None -> d 
-        in
-        match clr with 
-        | Some(c,v,l) -> Inc.if_ (lev l (bool_of_bit c)) ~then_:v ~else_:d
-        | None -> d
-      end
-      | _ -> failwith "expecting reg"
+    let empty_maps =
+      {
+        comb = UidMap.empty;
+        inps = UidMap.empty;
+        regs = UidMap.empty;
+        mems = UidMap.empty;
+      }
     in
-    let regs_nxt = List.map (fun s -> create_reg imap s) regs in
+    let imap, _ = create_list empty_maps (O.to_list outputs) in
+
+    (* outputs *)
+    let outputs_o = O.(map (fun s -> Inc.observe @@ UidMap.find (uid s) imap.comb) outputs) in
+
+    (* registers *)
+    let sorted_bindings m = List.sort (fun (a,_) (b,_) -> compare a b) @@ UidMap.bindings m in
+    let regs_t, regs_i, regs_o = 
+      let regs = sorted_bindings imap.regs in
+      List.map (fun (_,(s,_,_)) -> s) regs,
+      List.map (fun (_,(_,v,_)) -> v) regs,
+      List.map (fun (_,(_,_,w)) -> Inc.observe w) regs 
+    in
+
+    (* memories *)
+    let mems_t, mems_i, mems_o = 
+      let mems = sorted_bindings imap.mems in
+      List.map (fun (_,(s,_,_)) -> s) mems,
+      List.map (fun (_,(_,v,_)) -> v) mems,
+      List.map (fun (_,(_,_,w)) -> Inc.observe w) mems
+    in
+
+    (* inputs - convert map to I.t interface record *)
+    let inputs_v = sorted_bindings imap.inps in
+    let inputs_i = 
+      I.(map (fun i -> try List.assoc (uid i) inputs_v 
+                       with _ -> Var.create (B.zero (width i))) inputs) 
+    in
 
     let reset () = 
       (* get the registers reset value (or 0 if not specified) *)
-      let reset_val s = 
+      let reset_reg s = 
         match s with
-        | Signal_reg(id,r) -> begin
+        | Signal_reg(_,r) | Signal_mem(_,_,r,_) -> begin
            let rst_value = r.reg_reset_value in
            try B.constb (const_value rst_value) 
-           with _ -> B.zero id.s_width 
+           with _ -> B.zero (width s)
         end
-        | _ -> failwith "unexpected"
+        | _ -> unexpected s
       in
-      List.map reset_val regs, []
+      let reset_mem s = reset_reg s, MemMap.empty in
+      List.map reset_reg regs_t, List.map reset_mem mems_t
     in
 
-    (* observed outputs and registers *)
-    let outputs_o = O.(map (fun s -> Inc.observe @@ UidMap.find (uid s) imap) outputs) in
-    let regs_o = List.map Inc.observe regs_nxt in
-
-    let cycle (state,_) inps = 
+    let cycle (regs_s, mems_s) inps = 
       (* apply inputs *)
-      ignore @@ I.(map2 Var.set inputs_v inps);
+      ignore @@ I.(map2 Var.set inputs_i inps);
       (* apply current register values *)
-      List.iter2 Var.set regs_v state;
+      List.iter2 Var.set regs_i regs_s;
+      List.iter2 Var.set mems_i mems_s;
+      (* compute register/memory inputs *)
       Inc.stabilize ();
-      let nxt_state = List.map Inc.Observer.value_exn regs_o in
-      (* XXX reapply register values, then recompute outputs *)
-      List.iter2 Var.set regs_v nxt_state;
+      let outputs_c = O.map Inc.Observer.value_exn outputs_o in
+      (* get updated register/memory values *)
+      let regs_n = List.map Inc.Observer.value_exn regs_o in
+      let mems_n = List.map Inc.Observer.value_exn mems_o in
+      (* reapply register values, and compute outputs *)
+      List.iter2 Var.set regs_i regs_n;
+      List.iter2 Var.set mems_i mems_n;
       Inc.stabilize ();
-      let nxt_outputs = O.map Inc.Observer.value_exn outputs_o in
-      (nxt_state,[]), nxt_outputs
+      let outputs_n = O.map Inc.Observer.value_exn outputs_o in
+      (* next state and outputs *)
+      (regs_n, mems_n), outputs_c, outputs_n
     in
 
     reset, cycle
 
+  (* construct simulator *)
   let make f = 
     let i = I.map (fun (n,b) -> Signal.Comb.input n b) I.t in
     let o = f i in
