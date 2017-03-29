@@ -108,6 +108,8 @@ end = struct
 
     let unexpected signal = raise (Unexpected_signal (to_string signal)) in
     let unsupported signal = raise (Unsupported_signal (to_string signal)) in
+    
+    let poly x = Inc.set_cutoff x Inc.Cutoff.poly_equal; x in
 
     (* Construct incremental graph.
        Traverses the hardware graph recursively from outputs. *)
@@ -151,9 +153,11 @@ end = struct
             let sel = List.hd deps in
             let data = List.tl deps in
             let last = List.length data - 1 in
-            add @@ Inc.map2 
+            (*add @@ Inc.map2 
               ~f:(fun sel data -> List.nth data (min last (B.to_int sel))) 
-              sel Inc.(all data)
+              sel Inc.(all data)*)
+            let data = Array.of_list data in
+            add @@ Inc.bind sel (fun sel -> data.(min last (B.to_int sel)))
         end
 
         (* input wire *)
@@ -163,7 +167,7 @@ end = struct
           else
             let v = Var.create @@ B.zero (width signal) in (* XXX need this value *)
             let map = add_inps (uid signal) v map in
-            let w = Var.watch v in
+            let w = poly @@ Var.watch v in
             add_comb (uid signal) w map, w
 
         (* internal wires *)
@@ -182,7 +186,7 @@ end = struct
         | Signal_reg(_,r) ->
           (* create input for register, add to map *)
           let v = Var.create @@ B.zero (width signal) in
-          let q = Var.watch v in
+          let q = poly @@ Var.watch v in
           let map = add_comb (uid signal) q map in
           (* recurse to inputs (data, clock, reset, clear etc) *)
           let map, d = create_list map (deps signal) in
@@ -210,7 +214,7 @@ end = struct
           let v = Var.create @@ (B.zero (width signal), (MemMap.empty : B.t MemMap.t)) in
           let m = Var.watch v in
           let q = 
-            Inc.map2 
+            poly @@ Inc.map2 
               ~f:(fun addr (const,mem) -> 
                     try MemMap.find (B.to_int addr) mem with Not_found -> const) ra m
           in
@@ -268,9 +272,8 @@ end = struct
     let outputs_o = O.(map (fun s -> Inc.observe @@ UidMap.find (uid s) imap.comb) outputs) in
 
     (* registers *)
-    let sorted_bindings m = List.sort (fun (a,_) (b,_) -> compare a b) @@ UidMap.bindings m in
     let regs_t, regs_i, regs_o = 
-      let regs = sorted_bindings imap.regs in
+      let regs = UidMap.bindings imap.regs in
       List.map (fun (_,(s,_,_)) -> s) regs,
       List.map (fun (_,(_,v,_)) -> v) regs,
       List.map (fun (_,(_,_,w)) -> Inc.observe w) regs 
@@ -278,14 +281,14 @@ end = struct
 
     (* memories *)
     let mems_t, mems_i, mems_o = 
-      let mems = sorted_bindings imap.mems in
+      let mems = UidMap.bindings imap.mems in
       List.map (fun (_,(s,_,_)) -> s) mems,
       List.map (fun (_,(_,v,_)) -> v) mems,
       List.map (fun (_,(_,_,w)) -> Inc.observe w) mems
     in
 
     (* inputs - convert map to I.t interface record *)
-    let inputs_v = sorted_bindings imap.inps in
+    let inputs_v = UidMap.bindings imap.inps in
     let inputs_i = 
       I.(map (fun i -> try List.assoc (uid i) inputs_v 
                        with _ -> Var.create (B.zero (width i))) inputs) 
