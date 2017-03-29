@@ -5,7 +5,7 @@ accurate simulator.
 
 The hardware circuit can be thought of as follows:
 
-
+```
             +---------------+     +-----------+
             |               |<--->| Registers |
             | Combinational |     +-----------+
@@ -16,6 +16,7 @@ inputs ---->|    Logic      |
             |               |
             |               |----> outputs
             +---------------+
+```
 
 The registers and memories comprise the simulation state and are
 read and written during a simulation cycle.
@@ -67,12 +68,13 @@ better handled.*
 
 **experimental**
 
+|type|equality|
 |-|-|
-| inputs            | poly\_equal |
-| register state    | poly\_equal |
-| memory state      | phys\_equal |
-| memory read data  | poly\_equal |
-| all others        | phys\_equal |
+| inputs            | poly |
+| register state    | poly |
+| memory state      | phys |
+| memory read data  | poly |
+| all others        | phys |
 
 
 
