@@ -47,6 +47,24 @@ module Make(B : Comb.S)(I : Interface.S)(O : Interface.S)() : sig
 
   val make : (Signal.Comb.t I.t -> Signal.Comb.t O.t) -> reset * cycle
 
+  module Stats : sig
+    type t = 
+      {
+        stabilizes : int;
+        var_sets : int;
+        necessary : int;
+        unnecessary : int;
+        changed : int;
+        created : int;
+        recomputed : int;
+      }
+
+    val get : unit -> t
+    val diff : t -> t -> t
+    val print : out_channel -> t -> unit
+    val print_diff : out_channel -> (unit -> unit)
+  end
+
 end = struct
 
   open Circuit
@@ -109,7 +127,10 @@ end = struct
     let unexpected signal = raise (Unexpected_signal (to_string signal)) in
     let unsupported signal = raise (Unsupported_signal (to_string signal)) in
     
-    let poly x = Inc.set_cutoff x Inc.Cutoff.poly_equal; x in
+    let opt = true in
+    let poly x = if opt then (Inc.set_cutoff x Inc.Cutoff.poly_equal; x) else x in
+    
+    let deps_ne s = List.filter ((<>) Signal_empty) (deps s) in
 
     (* Construct incremental graph.
        Traverses the hardware graph recursively from outputs. *)
@@ -189,7 +210,7 @@ end = struct
           let q = poly @@ Var.watch v in
           let map = add_comb (uid signal) q map in
           (* recurse to inputs (data, clock, reset, clear etc) *)
-          let map, d = create_list map (deps signal) in
+          let map, d = create_list map (deps_ne signal) in
           let d = List.hd d in (* input data *)
           (* implement next value register logic *)
           let clr, ena = register_clr_ena map.comb r in
@@ -219,7 +240,7 @@ end = struct
                     try MemMap.find (B.to_int addr) mem with Not_found -> const) ra m
           in
           let map = add_comb (uid signal) q map in
-          let map, _ = create_list map (deps signal) in
+          let map, _ = create_list map (deps_ne signal) in
           (* memory write logic (clear, enable etc) *)
           let clr, ena = register_clr_ena map.comb r in
           let lev l b = if l then b else Inc.map ~f:(not) b in
@@ -338,6 +359,56 @@ end = struct
     let o = f i in
     let reset, cycle = build_sim i o in
     reset, cycle
+
+  module Stats = struct
+
+    type t = 
+      {
+        stabilizes : int;
+        var_sets : int;
+        necessary : int;
+        unnecessary : int;
+        changed : int;
+        created : int;
+        recomputed : int;
+      }
+
+    let get () = 
+      let open Inc.State in
+      {
+        stabilizes = num_stabilizes t;
+        var_sets = num_var_sets t;
+        necessary = num_nodes_became_necessary t;
+        unnecessary = num_nodes_became_unnecessary t;
+        changed = num_nodes_changed t;
+        created = num_nodes_created t;
+        recomputed = num_nodes_recomputed t;
+      }
+
+    let diff s t = 
+      {
+        stabilizes = s.stabilizes - t.stabilizes;
+        var_sets = s.var_sets - t.var_sets;
+        necessary = s.necessary - t.necessary;
+        unnecessary = s.unnecessary - t.unnecessary;
+        changed = s.changed - t.changed;
+        created = s.created - t.created;
+        recomputed = s.recomputed - t.recomputed;
+      }
+
+    let print f stats = 
+      Printf.fprintf f "[%i] sets=%i necessary=+%i/-%i node=%i/%i/%i\n"
+        stats.stabilizes stats.var_sets stats.necessary stats.unnecessary
+        stats.changed stats.created stats.recomputed
+
+    let print_diff f = 
+      let s = ref (get ()) in
+      (fun () -> 
+         let t = get () in
+         print f (diff t !s);
+         s := t)
+
+  end
 
 end
 

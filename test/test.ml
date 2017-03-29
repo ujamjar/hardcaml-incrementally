@@ -36,7 +36,11 @@ let test () =
   let open O in
   let sim = reset () in
   let show o = Printf.printf "%i %i " (B.to_int o.c) (B.to_int o.d); in
-  let show o n = show o; show n; Printf.printf "\n" in
+  let show_stats = G.Stats.print_diff stdout in
+  let show o n = 
+    show o; show n; Printf.printf "\n";
+    show_stats ()
+  in
   let def = { ena = B.vdd; a = B.gnd; b = B.gnd } in
   let sim,o,n = cycle sim { def with a = B.vdd; b = B.gnd } in
   show o n;
