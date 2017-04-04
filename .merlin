@@ -1,6 +1,8 @@
 PKG hardcaml
 PKG ppx_deriving_hardcaml
 PKG incremental
+PKG lwt
+PKG lwt.ppx
 SRC src
 B _build/src
 B _build/test

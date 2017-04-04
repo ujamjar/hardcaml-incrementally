@@ -76,5 +76,10 @@ better handled.*
 | memory read data  | poly |
 | all others        | phys |
 
+Using polymorphic equality allows portions of the graph to remain unchanged
+during stabilization because the inputs, registers or memories are unchanged.
 
+Polymorphic equality is more expensive than the default of physical equality.
+Indeed, nearly as expensive and some of the operations themselves so we only
+perform them around the inputs and state.
 
