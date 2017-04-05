@@ -1,0 +1,8 @@
+version = "%{version}%"
+description = "Incremental based HardCaml simulator"
+requires = "hardcaml incremental_kernel"
+archive(byte) = "HardCamlIncrementally.cma"
+archive(byte, plugin) = "HardCamlIncrementally.cma"
+archive(native) = "HardCamlIncrementally.cmxa"
+archive(native, plugin) = "HardCamlIncrementally.cmxs"
+exists_if = "HardCamlIncrementally.cma"

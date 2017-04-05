@@ -1,0 +1,4 @@
+"src": include
+<src/*.cmx> and not "src/HardCamlIncrementally.cmx": for-pack(HardCamlIncrementally)
+
+true: package(hardcaml,incremental_kernel), thread

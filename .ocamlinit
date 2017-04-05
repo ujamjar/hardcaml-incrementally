@@ -1,3 +1,4 @@
-#require "hardcaml,hardcaml.lwttb,ppx_deriving_hardcaml,incremental,lwt.ppx,lwt.unix,ppx_deriving.show";;
+#require "hardcaml,hardcaml.lwttb,ppx_deriving_hardcaml,incremental_kernel";;
+#require "lwt.ppx,lwt.unix,ppx_deriving.show";;
 #directory "_build/src";;
-#load "_build/src/sim.cma";;
+#load "_build/src/HardCamlIncrementally.cma";;

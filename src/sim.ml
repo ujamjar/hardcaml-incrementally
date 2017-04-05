@@ -1,76 +1,11 @@
-(*
-  Perform cycle accurate simulation using Incremental as the scheduling engine.
-
-  The combinatorial logic is converted to an Incremental DAG by extracting all 
-  registers and turning then into input/output pairs.
-
-  (note; the API doesn't enforce combinatorial logic to be a DAG, but it doesn't
-         make sense if its not.  With registers, the graph can be cyclic which is
-         why they must be extracted)
-
-  Register and memory state is updated externally.
-
-  An update step consists of the following parts
-
-   1. Inputs are set by the testbench
-   2. The inputs are copied into the incremental graph.
-   3. Current values of registers are copied to the incremental graph
-   4. The graph is stabalized - this calculates the next input values for the 
-      registers (and the output values, based on the new inputs and the old
-      register state).
-
-  The above does the calculations required and updates correctly, however, it
-  doesn't produce the correct outputs.  The following additional steps are
-  therefore (sometimes) required
-
-   5. Update the register inputs with the newly calculated values
-   6. Stabalize the graph
-
-  (note; step 3 can be moved into the reset function)
-*)
-
 open HardCaml
 
-module Make(B : Comb.S)(I : Interface.S)(O : Interface.S)() : sig
-
-  module MemMap : Map.S with type key = int
-
-  type register = B.t
-  type memory = B.t * B.t MemMap.t
-  type simulator = register list * memory list
-  type reset = unit -> simulator
-  type cycle = simulator -> B.t I.t -> simulator * B.t O.t * B.t O.t
-
-  exception Unexpected_signal of string
-  exception Unsupported_signal of string
-  exception Input_has_multiple_names of string
-
-  val make : (Signal.Comb.t I.t -> Signal.Comb.t O.t) -> reset * cycle
-
-  module Stats : sig
-    type t = 
-      {
-        stabilizes : int;
-        var_sets : int;
-        necessary : int;
-        unnecessary : int;
-        changed : int;
-        created : int;
-        recomputed : int;
-      }
-
-    val get : unit -> t
-    val diff : t -> t -> t
-    val print : out_channel -> t -> unit
-    val print_diff : out_channel -> (unit -> unit)
-  end
-
-end = struct
+module Make(B : Comb.S)(I : Interface.S)(O : Interface.S)() = struct
 
   open Circuit
   open Signal.Types
 
-  module Inc = Incremental_lib.Incremental.Make ()
+  module Inc = Incremental_kernel.Incremental.Make ()
   module Var = Inc.Var
 
   module MemMap = Map.Make(struct
@@ -80,9 +15,20 @@ end = struct
 
   type register = B.t
   type memory = B.t * B.t MemMap.t
-  type simulator = register list * memory list
-  type reset = unit -> simulator
-  type cycle = simulator -> B.t I.t -> simulator * B.t O.t * B.t O.t
+  type state = register list * memory list
+
+  type reset = unit -> state
+  type cycle = state -> B.t I.t -> state * B.t O.t * B.t O.t
+
+  type simfns = 
+    {
+      init : unit -> state;
+      set_inputs : B.t I.t -> unit;
+      set_state : state -> unit;
+      get_outputs : unit -> B.t O.t;
+      get_state : unit -> state;
+      stabilize : unit -> unit;
+    }
 
   exception Unexpected_signal of string
   exception Unsupported_signal of string
@@ -315,7 +261,7 @@ end = struct
                        with _ -> Var.create (B.zero (width i))) inputs) 
     in
 
-    let reset () = 
+    let init () = 
       (* get the registers reset value (or 0 if not specified) *)
       let reset_reg s = 
         match s with
@@ -330,35 +276,54 @@ end = struct
       List.map reset_reg regs_t, List.map reset_mem mems_t
     in
 
-    let cycle (regs_s, mems_s) inps = 
-      (* apply inputs *)
-      ignore @@ I.(map2 Var.set inputs_i inps);
-      (* apply current register values *)
-      List.iter2 Var.set regs_i regs_s;
-      List.iter2 Var.set mems_i mems_s;
-      (* compute register/memory inputs *)
-      Inc.stabilize ();
-      let outputs_c = O.map Inc.Observer.value_exn outputs_o in
-      (* get updated register/memory values *)
-      let regs_n = List.map Inc.Observer.value_exn regs_o in
-      let mems_n = List.map Inc.Observer.value_exn mems_o in
-      (* reapply register values, and compute outputs *)
-      List.iter2 Var.set regs_i regs_n;
-      List.iter2 Var.set mems_i mems_n;
-      Inc.stabilize ();
-      let outputs_n = O.map Inc.Observer.value_exn outputs_o in
-      (* next state and outputs *)
-      (regs_n, mems_n), outputs_c, outputs_n
+    let set_inputs inps = ignore @@ I.(map2 Var.set inputs_i inps) in
+    let set_state (regs,mems) = 
+      List.iter2 Var.set regs_i regs;
+      List.iter2 Var.set mems_i mems
     in
+    let get_outputs () = O.map Inc.Observer.value_exn outputs_o in
+    let get_state () = 
+      let regs = List.map Inc.Observer.value_exn regs_o in
+      let mems = List.map Inc.Observer.value_exn mems_o in
+      regs, mems
+    in
+    let stabilize () = Inc.stabilize () in
+    
+    { init; set_inputs; set_state; get_outputs; get_state; stabilize }
 
-    reset, cycle
+  let reset sim = sim.init
+
+  let cycle_comb0 sim st inps = 
+    sim.set_inputs inps;
+    sim.set_state st;
+    sim.stabilize ();
+    sim.get_outputs () 
+
+  let cycle_seq sim = 
+    let st_n = sim.get_state () in
+    sim.set_state st_n;
+    st_n
+
+  let cycle_comb1 sim = 
+    sim.stabilize ();
+    let outputs_n = sim.get_outputs () in
+    outputs_n
+
+  let cycle sim st inps = 
+    let outputs_c = cycle_comb0 sim st inps in
+    let st_n = cycle_seq sim in
+    let outputs_n = cycle_comb1 sim in
+    st_n, outputs_c, outputs_n
+
+  let make_inc f = 
+    let i = I.map (fun (n,b) -> Signal.Comb.input n b) I.t in
+    let o = f i in
+    build_sim i o 
 
   (* construct simulator *)
   let make f = 
-    let i = I.map (fun (n,b) -> Signal.Comb.input n b) I.t in
-    let o = f i in
-    let reset, cycle = build_sim i o in
-    reset, cycle
+    let sim = make_inc f in
+    reset sim, cycle sim
 
   module Stats = struct
 
