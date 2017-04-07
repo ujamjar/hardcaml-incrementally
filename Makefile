@@ -6,6 +6,10 @@ build:
 	cp pkg/META.in pkg/META
 	ocaml pkg/pkg.ml build
 
+.PHONY: test
+test:
+	ocamlbuild -use-ocamlfind test/cntr.byte test/lwttb.byte test/test.byte
+
 clean:
 	ocaml pkg/pkg.ml clean
 

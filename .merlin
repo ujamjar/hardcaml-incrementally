@@ -1,6 +1,6 @@
 PKG hardcaml
 PKG ppx_deriving_hardcaml
-PKG incremental
+PKG incremental_kernel
 PKG lwt
 PKG lwt.ppx
 PKG topkg

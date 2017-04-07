@@ -1,4 +1,6 @@
 "src": include
 <src/*.cmx> and not "src/HardCamlIncrementally.cmx": for-pack(HardCamlIncrementally)
 
+<test/*>: package(ppx_deriving_hardcaml, ppx_deriving.show, hardcaml.lwttb, lwt, lwt.ppx, lwt.unix)
+
 true: package(hardcaml,incremental_kernel), thread
