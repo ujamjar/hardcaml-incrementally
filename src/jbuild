@@ -1,0 +1,6 @@
+(jbuild_version 1)
+
+(library 
+ ((name HardCamlIncrementally)
+  (public_name hardcaml-incrementally)
+  (libraries (hardcaml incremental_kernel))))

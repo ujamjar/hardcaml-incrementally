@@ -6,15 +6,13 @@ license: "ISC"
 homepage: "https://github.com/ujamjar/hardcaml-incrementally"
 bug-reports: "https://github.com/ujamjar/hardcaml-incrementally/issues"
 dev-repo: "https://github.com/ujamjar/hardcaml-incrementally.git"
-build: [ ["ocaml" "pkg/pkg.ml" "build"] ]
+build: [ ["jbuilder" "build" "-p" name "-j" jobs] ]
 depends: [
   "ocamlfind" {build}
-  "ocamlbuild" {build}
-  "topkg" {build}
+  "jbuilder" {build & >= "1.0+beta8"}
   "hardcaml" { >= "1.2.0" & < "2.0.0" }
   "incremental_kernel"
 ]
 available: [ ocaml-version >= "4.04.0" ]
 version: "0.1.0"
 license: "ISC"
-substs:[ "pkg/META" ]

@@ -1,0 +1,6 @@
+(jbuild_version 1)
+
+(alias
+ ((name test)
+  (deps (test/lwttb.exe test/cntr.exe test/test.exe))))  ;; need ppx_deriving fix
+
