@@ -13,6 +13,5 @@ depends: [
   "hardcaml" { >= "1.2.0" & < "2.0.0" }
   "incremental_kernel"
 ]
-available: [ ocaml-version >= "4.04.0" ]
 version: "0.1.0"
 license: "ISC"
